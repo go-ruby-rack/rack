@@ -49,10 +49,14 @@ gem on every supported platform:
   map (with the deprecated aliases), and `StatusWithNoEntityBody`.
 - **Headers** — `Headers`, the insertion-ordered, key-down-casing map mirroring
   `Rack::Headers`.
-- **Content negotiation** — `QValues`, `BestQMatch`, and `GetByteRanges` /
-  byte-range parsing.
-- **Cookies** — `ParseCookiesHeader`, `MakeCookieHeader` /
-  `MakeDeleteCookieHeader`, and the `…Into(*Headers, …)` mutators.
+- **Content negotiation** — `QValues`, `BestQMatch`, `SelectBestEncoding`
+  (Accept-Encoding), and `GetByteRanges` / byte-range parsing.
+- **Path & security helpers** — `CleanPathInfo` (traversal-safe path
+  normalisation), `ValidPath`, `SecureCompare` (constant-time), and
+  `ForwardedValues` (RFC 7239 `Forwarded` parsing).
+- **Cookies** — `ParseCookiesHeader` / `ParseCookies` (from an `Env`),
+  `MakeCookieHeader` / `MakeDeleteCookieHeader`, and the `…Into(*Headers, …)`
+  mutators.
 - **`Request`** over an `Env` — method predicates, `PathInfo` / `QueryString` /
   `GET` / `POST` / `Params` / `Cookies`, `ContentType` / `MediaType`, `Host` /
   `Port` / `Scheme` / `SSL` / `BaseURL` / `URL` / `Fullpath`, `XHR`, `IP` (with

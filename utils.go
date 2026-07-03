@@ -5,9 +5,11 @@
 package rack
 
 import (
+	"crypto/subtle"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // QValue is one entry of an Accept-style header: a media/encoding value and its
@@ -238,4 +240,272 @@ func atoiRuby(s string) int {
 		return -n
 	}
 	return n
+}
+
+// nullByte is the byte ValidPath rejects, matching Rack::Utils::NULL_BYTE.
+const nullByte = "\x00"
+
+// ValidPath reports whether path is a valid request path, matching
+// Rack::Utils.valid_path?: the bytes must be valid UTF-8 and contain no NUL.
+func ValidPath(path string) bool {
+	return utf8.ValidString(path) && !strings.Contains(path, nullByte)
+}
+
+// CleanPathInfo canonicalises a PATH_INFO the way Rack::Utils.clean_path_info
+// does: it splits on '/', drops empty and "." segments, pops the last kept
+// segment for each "..", and rejoins with '/'. A leading '/' is restored when
+// the input was empty or began with a separator. This is the traversal-safe
+// normalisation Rack::Files and the static middleware rely on.
+func CleanPathInfo(pathInfo string) string {
+	parts := splitPathSeps(pathInfo)
+	clean := make([]string, 0, len(parts))
+	for _, part := range parts {
+		switch part {
+		case "", ".":
+			// skip
+		case "..":
+			if len(clean) > 0 {
+				clean = clean[:len(clean)-1]
+			}
+		default:
+			clean = append(clean, part)
+		}
+	}
+	cleanPath := strings.Join(clean, "/")
+	if len(parts) == 0 || parts[0] == "" {
+		cleanPath = "/" + cleanPath
+	}
+	return cleanPath
+}
+
+// splitPathSeps splits on single '/' characters with Ruby String#split
+// semantics: trailing empty fields are dropped, but leading and interior empty
+// fields (from "//" or a leading "/") are preserved. Rack's PATH_SEPS is the
+// bare "/" separator on POSIX hosts.
+func splitPathSeps(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, "/")
+	// Ruby's split drops trailing empty strings.
+	end := len(parts)
+	for end > 0 && parts[end-1] == "" {
+		end--
+	}
+	return parts[:end]
+}
+
+// SecureCompare reports whether a and b are equal using a constant-time
+// comparison, matching Rack::Utils.secure_compare. It returns false immediately
+// when the lengths differ (as MRI does before the fixed-length compare), so it
+// leaks length but not content, and is safe for comparing secrets such as CSRF
+// tokens.
+func SecureCompare(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// SelectBestEncoding picks the best available content-coding for an
+// Accept-Encoding preference list, matching Rack::Utils.select_best_encoding.
+// available is the server's ordered coding list (its order breaks quality ties);
+// accept is the parsed Accept-Encoding as value/quality pairs (typically from
+// [QValues]). Only the first 16 accept entries are considered. A "*" expands to
+// every available coding not named explicitly; "identity" is always an implicit
+// candidate unless disqualified by a q=0. It returns ("", false) when nothing is
+// acceptable (the Ruby nil).
+func SelectBestEncoding(available []string, accept []QValue) (string, bool) {
+	if len(accept) > 16 {
+		accept = accept[:16]
+	}
+	type cand struct {
+		enc  string
+		q    float64
+		pref int
+	}
+	prefOf := func(enc string) int {
+		for i, a := range available {
+			if a == enc {
+				return i
+			}
+		}
+		return len(available)
+	}
+	named := make(map[string]bool, len(accept))
+	for _, qv := range accept {
+		named[qv.Value] = true
+	}
+	var expanded []cand
+	wildcardSeen := false
+	for _, qv := range accept {
+		pref := prefOf(qv.Value)
+		if qv.Value == "*" {
+			if !wildcardSeen {
+				for _, m2 := range available {
+					if !named[m2] {
+						expanded = append(expanded, cand{m2, qv.Quality, pref})
+					}
+				}
+				wildcardSeen = true
+			}
+			continue
+		}
+		expanded = append(expanded, cand{qv.Value, qv.Quality, pref})
+	}
+	sorted := make([]cand, len(expanded))
+	copy(sorted, expanded)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].q != sorted[j].q {
+			return sorted[i].q > sorted[j].q // higher quality first
+		}
+		return sorted[i].pref < sorted[j].pref // then server preference order
+	})
+	candidates := make([]string, 0, len(sorted)+1)
+	for _, c := range sorted {
+		candidates = append(candidates, c.enc)
+	}
+	if !containsStr(candidates, "identity") {
+		candidates = append(candidates, "identity")
+	}
+	// A q=0 disqualifies a coding entirely (delete every occurrence).
+	for _, c := range expanded {
+		if c.q == 0.0 {
+			candidates = deleteStr(candidates, c.enc)
+		}
+	}
+	availSet := make(map[string]bool, len(available))
+	for _, a := range available {
+		availSet[a] = true
+	}
+	for _, c := range candidates {
+		if availSet[c] {
+			return c, true
+		}
+	}
+	return "", false
+}
+
+func containsStr(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func deleteStr(xs []string, s string) []string {
+	out := xs[:0]
+	for _, x := range xs {
+		if x != s {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// allowedForwardedParams is the set of Forwarded header parameters Rack accepts,
+// matching Rack::Utils::ALLOWED_FORWARED_PARAMS. Any other parameter aborts the
+// whole parse.
+var allowedForwardedParams = map[string]bool{"by": true, "for": true, "host": true, "proto": true}
+
+const (
+	forwardedMaxParams  = 1024
+	forwardedMaxEscapes = 1024
+)
+
+// ForwardedValues parses an RFC 7239 Forwarded header into its parameter lists,
+// matching Rack::Utils.forwarded_values. It returns (nil, false) when the header
+// is absent, contains a disallowed parameter, or exceeds the DoS guards (more
+// than 1024 parameters or 1024 quoted escapes); otherwise it returns a map from
+// the lower-cased parameter name ("by", "for", "host", "proto") to the ordered
+// list of its values. present is false exactly when the Ruby method returns nil.
+func ForwardedValues(forwardedHeader string, hasHeader bool) (map[string][]string, bool) {
+	if !hasHeader {
+		return nil, false
+	}
+	header := strings.ReplaceAll(forwardedHeader, "\n", ";")
+	header = trimLeftSet(header, " \t;,")
+	params := map[string][]string{}
+	numParams, numEscapes := 0, 0
+	for {
+		eq := strings.IndexByte(header, '=')
+		if eq < 0 {
+			break
+		}
+		numParams++
+		if numParams > forwardedMaxParams {
+			return nil, false
+		}
+		param := header[:eq]
+		header = header[eq+1:]
+		param = strings.TrimSpace(param)
+		param = strings.ToLower(param)
+		if !allowedForwardedParams[param] {
+			return nil, false
+		}
+		var value string
+		if len(header) > 0 && header[0] == '"' {
+			header = header[1:]
+			var b strings.Builder
+			for {
+				i := strings.IndexAny(header, "\"\\")
+				if i < 0 {
+					// Unterminated quote: consume the remainder.
+					b.WriteString(header)
+					header = ""
+					break
+				}
+				c := header[i]
+				b.WriteString(header[:i])
+				header = header[i+1:]
+				if c == '"' {
+					break
+				}
+				numEscapes++
+				if numEscapes > forwardedMaxEscapes {
+					return nil, false
+				}
+				if len(header) > 0 {
+					b.WriteByte(header[0])
+					header = header[1:]
+				}
+			}
+			value = b.String()
+		} else if i := strings.IndexAny(header, ";,"); i >= 0 {
+			value = header[:i]
+			value = trimRightSet(value, " \t;,")
+			header = header[i:]
+			value = strings.TrimLeft(value, " \t")
+		} else {
+			header = strings.TrimSpace(header)
+			value = header
+			header = ""
+			value = strings.TrimLeft(value, " \t")
+		}
+		params[param] = append(params[param], value)
+		if header != "" {
+			header = trimLeftSet(header, " \t;,")
+		}
+	}
+	return params, true
+}
+
+// trimLeftSet trims any leading bytes contained in set.
+func trimLeftSet(s, set string) string {
+	i := 0
+	for i < len(s) && strings.IndexByte(set, s[i]) >= 0 {
+		i++
+	}
+	return s[i:]
+}
+
+// trimRightSet trims any trailing bytes contained in set.
+func trimRightSet(s, set string) string {
+	j := len(s)
+	for j > 0 && strings.IndexByte(set, s[j-1]) >= 0 {
+		j--
+	}
+	return s[:j]
 }

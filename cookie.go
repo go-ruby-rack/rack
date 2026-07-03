@@ -139,6 +139,14 @@ func MakeDeleteCookieHeader(key string, c CookieValue) (string, error) {
 	return MakeCookieHeader(key, c)
 }
 
+// ParseCookies extracts and parses the Cookie header (env["HTTP_COOKIE"]) from a
+// Rack environment, matching Rack::Utils.parse_cookies. A missing or non-string
+// HTTP_COOKIE parses as an empty header.
+func ParseCookies(env Env) *Params {
+	str, _ := env[HTTPCookie].(string)
+	return ParseCookiesHeader(str)
+}
+
 // ParseCookiesHeader parses a Cookie header value into an ordered map of cookie
 // key to value, matching Rack::Utils.parse_cookies_header (RFC6265, splitting on
 // ';'). The first occurrence of a key wins. A cookie with no '=' maps to a nil
