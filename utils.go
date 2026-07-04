@@ -452,9 +452,14 @@ func ForwardedValues(forwardedHeader string, hasHeader bool) (map[string][]strin
 			for {
 				i := strings.IndexAny(header, "\"\\")
 				if i < 0 {
-					// Unterminated quote: consume the remainder.
-					b.WriteString(header)
-					header = ""
+					// Unterminated quote: MRI's `while i = header.index(...)`
+					// loop simply stops when no closing quote or escape
+					// remains. The accumulated value is kept as-is and the
+					// unconsumed remainder stays in header — it is NOT folded
+					// into the value. Leaving it in header reproduces MRI's
+					// behaviour where the leftover either yields nothing more
+					// (no further '=') or forms a bogus parameter name that
+					// aborts the whole parse to nil.
 					break
 				}
 				c := header[i]

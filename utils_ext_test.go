@@ -126,7 +126,14 @@ func TestForwardedValues(t *testing.T) {
 		{"absent", "", false, nil, false},
 		{"disallowed", "bogus=x", true, nil, false},
 		{"quoted-escape", `for="a\"b"`, true, map[string][]string{"for": {`a"b`}}, true},
-		{"unterminated-quote", `for="abc`, true, map[string][]string{"for": {"abc"}}, true},
+		// MRI discards an unterminated quoted-string: the value is whatever was
+		// accumulated before the missing closing quote (here, empty), not the
+		// raw remainder of the header.
+		{"unterminated-quote", `for="abc`, true, map[string][]string{"for": {""}}, true},
+		{"unterminated-empty", `for="`, true, map[string][]string{"for": {""}}, true},
+		{"unterminated-after-escaped-quote", `for="a\"unterminated`, true, map[string][]string{"for": {`a"`}}, true},
+		{"unterminated-valid-plus-bad", `for="valid";host="unterminated`, true, map[string][]string{"for": {"valid"}, "host": {""}}, true},
+		{"unterminated-swallows-next-param", `for="unterminated;host=x`, true, nil, false},
 		{"rest-of-line", "for=abc", true, map[string][]string{"for": {"abc"}}, true},
 		{"newline", "for=a\nproto=b", true, map[string][]string{"for": {"a"}, "proto": {"b"}}, true},
 		{"case-insensitive", "For=UP;PROTO=HTTPS", true, map[string][]string{"for": {"UP"}, "proto": {"HTTPS"}}, true},
@@ -257,12 +264,29 @@ func TestOracleSelectBestEncoding(t *testing.T) {
 func TestOracleForwardedValues(t *testing.T) {
 	bin := rubyBin(t)
 	inputs := []string{
+		// Well-formed baselines: these must never regress.
 		"for=1.2.3.4;proto=https",
 		`for="[2001:db8::1]:8080";host=example.com`,
 		"for=a, for=b",
 		"bogus=x",
 		"For=UP;PROTO=HTTPS",
 		"by=203.0.113.43",
+		"for=a ;proto=b",
+		`for="abc";host=y`,
+		`for=""`,
+		`for="a\"b"`,
+		// Malformed quoted-string corpus: MRI discards the unterminated token,
+		// keeping only what was accumulated before the missing closing quote and
+		// leaving the remainder in the header (which may abort to nil).
+		`for="unterminated`,
+		`for="abc`,
+		`for="a\"unterminated`,
+		`for="ab\`,
+		`for="ab\c`,
+		`for="valid";host="unterminated`,
+		`for="unterminated;host=x`,
+		`proto="https";for="1.2.3.4`,
+		`host="a";for=b, proto="c`,
 	}
 	// Canonicalise the Ruby hash to "param=v1|v2;param2=..." with params sorted.
 	script := rubyArrayPreamble(inputs) + `INPUTS.each do |s|
