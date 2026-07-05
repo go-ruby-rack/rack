@@ -6,6 +6,7 @@ package rack
 
 import (
 	"strings"
+	"unsafe"
 )
 
 // hexUpper formats one byte as two upper-case hex digits, like Ruby's URI escaper.
@@ -151,21 +152,60 @@ func UnescapePath(s string) string {
 	return b.String()
 }
 
-// htmlEscapes maps the five characters CGI.escapeHTML (and thus
-// Rack::Utils.escape_html) replaces with entities. Note the apostrophe uses the
-// numeric reference &#39;, exactly as MRI emits.
-var htmlEscaper = strings.NewReplacer(
-	"&", "&amp;",
-	"<", "&lt;",
-	">", "&gt;",
-	`"`, "&quot;",
-	"'", "&#39;",
-)
+// htmlEscapes is a 256-entry lookup from a byte to the HTML entity
+// Rack::Utils.escape_html (CGI.escapeHTML) emits for it, or the empty string
+// when the byte is copied verbatim. Only the five characters MRI's cgi/escape C
+// core encodes have entries; the apostrophe is the numeric "&#39;" (matching
+// MRI), not "&apos;". Indexing this array by a byte value is bounds-check-free,
+// so the escape scan is a single table load per byte with no branch tree — the
+// same technique used by go-ruby-cgi's escaper, and far cheaper than the
+// two-pass strings.Replacer it replaces.
+var htmlEscapes = [256]string{
+	'&':  "&amp;",
+	'<':  "&lt;",
+	'>':  "&gt;",
+	'"':  "&quot;",
+	'\'': "&#39;",
+}
 
 // EscapeHTML escapes ampersands, angle brackets and quotes to their HTML/XML
-// entities, matching Rack::Utils.escape_html (CGI.escapeHTML).
+// entities, matching Rack::Utils.escape_html (CGI.escapeHTML). The single quote
+// becomes the numeric reference "&#39;", exactly as MRI emits.
+//
+// It mirrors the table-driven native path of MRI's cgi/escape C core: a single
+// pass over the bytes bulk-copies each verbatim run and splices in the entity
+// for each escapable byte, straight into one output buffer. Inputs with nothing
+// to escape return the original string with no allocation at all.
 func EscapeHTML(s string) string {
-	return htmlEscaper.Replace(s)
+	// Fast path: find the first byte that needs escaping. If there is none the
+	// input is returned untouched, with no allocation.
+	i := 0
+	for i < len(s) && len(htmlEscapes[s[i]]) == 0 {
+		i++
+	}
+	if i == len(s) {
+		return s
+	}
+	// One output allocation. 2×len comfortably covers any realistic markup — the
+	// escapable bytes are a small fraction of real HTML — and append grows the
+	// buffer safely in the rare high-density case, so correctness never depends
+	// on the estimate.
+	buf := make([]byte, 0, 2*len(s))
+	buf = append(buf, s[:i]...)
+	last := i
+	for ; i < len(s); i++ {
+		e := htmlEscapes[s[i]]
+		if len(e) == 0 {
+			continue
+		}
+		buf = append(buf, s[last:i]...) // bulk-copy the safe run before this byte
+		buf = append(buf, e...)         // splice in the entity
+		last = i + 1
+	}
+	buf = append(buf, s[last:]...) // trailing safe run
+	// buf is freshly allocated and never aliases s, so the zero-copy conversion
+	// is safe (this is exactly what strings.Builder does internally).
+	return unsafe.String(unsafe.SliceData(buf), len(buf))
 }
 
 // UnescapeHTML reverses EscapeHTML, decoding the named and numeric character

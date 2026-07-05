@@ -89,7 +89,12 @@ func TestOracleUnescape(t *testing.T) {
 
 func TestOracleEscapeHTML(t *testing.T) {
 	bin := rubyBin(t)
-	inputs := []string{`<a href="x">& '`, "plain", "&&<<>>"}
+	inputs := []string{
+		`<a href="x">& '`, "plain", "&&<<>>",
+		"&leading", "trailing&", // escape at the two boundaries
+		`<p class="lead">Tom &amp; Jerry's "quote" &lt;3</p>`, // realistic mixed markup
+		"no entities here at all",                             // fast-path (returns input unchanged)
+	}
 	want := rubyLines(t, bin, rubyArrayPreamble(inputs)+`INPUTS.each { |s| puts Rack::Utils.escape_html(s) }`)
 	for i, in := range inputs {
 		if got := EscapeHTML(in); got != want[i] {
