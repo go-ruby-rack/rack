@@ -93,10 +93,23 @@ func TestUnescapePath(t *testing.T) {
 }
 
 func TestEscapeHTML(t *testing.T) {
-	in := `<a href="x">& '`
-	want := "&lt;a href=&quot;x&quot;&gt;&amp; &#39;"
-	if got := EscapeHTML(in); got != want {
-		t.Errorf("EscapeHTML(%q) = %q, want %q", in, got, want)
+	cases := map[string]string{
+		`<a href="x">& '`: "&lt;a href=&quot;x&quot;&gt;&amp; &#39;",
+		"":                "",        // empty input
+		"plain text":      "plain text", // nothing to escape (identity fast path)
+		"&leading":        "&amp;leading",
+		"trailing&":       "trailing&amp;",
+		"&<>\"'":          "&amp;&lt;&gt;&quot;&#39;", // every escapable byte
+	}
+	for in, want := range cases {
+		if got := EscapeHTML(in); got != want {
+			t.Errorf("EscapeHTML(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// The no-escape fast path must return the original string with no copy.
+	s := "identical"
+	if got := EscapeHTML(s); got != s {
+		t.Errorf("EscapeHTML(%q) = %q, want identity", s, got)
 	}
 }
 
