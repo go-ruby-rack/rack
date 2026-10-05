@@ -95,7 +95,7 @@ func TestUnescapePath(t *testing.T) {
 func TestEscapeHTML(t *testing.T) {
 	cases := map[string]string{
 		`<a href="x">& '`: "&lt;a href=&quot;x&quot;&gt;&amp; &#39;",
-		"":                "",        // empty input
+		"":                "",           // empty input
 		"plain text":      "plain text", // nothing to escape (identity fast path)
 		"&leading":        "&amp;leading",
 		"trailing&":       "trailing&amp;",
